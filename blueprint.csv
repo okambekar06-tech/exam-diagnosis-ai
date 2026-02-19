@@ -1,8 +1,1 @@
-QID,keyword,type
-Q1,queue,concept
-Q1,FIFO,concept
-Q1,enqueue,concept
-Q1,front,concept
-Q1,rear,concept
-Q1,definition,structure
-Q1,example,structure
+question,keywords,marks,suggestion

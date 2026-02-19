@@ -1,169 +1,189 @@
 import streamlit as st
-from google.cloud import vision
-from PIL import Image
+import pandas as pd
 import plotly.graph_objects as go
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+import io
+import random
 
-# ---------------- PAGE SETUP ----------------
+# ---------------- PAGE ----------------
 st.set_page_config(page_title="Exam Diagnosis AI", layout="wide")
 
-st.title("📘 Exam Diagnosis AI System")
+# ---------------- LOAD USERS ----------------
+@st.cache_data
+def load_users():
+    return pd.read_csv("users.csv")
 
-# ---------------- SECURITY SYSTEM ----------------
-if "teacher_locked" not in st.session_state:
-    st.session_state.teacher_locked = False
+# ---------------- LOGIN ----------------
+def authenticate(username, password):
+    users = load_users()
+    user = users[(users.username==username) & (users.password==password)]
+    if not user.empty:
+        return user.iloc[0].to_dict()
+    return None
 
-if "teacher_key" not in st.session_state:
-    st.session_state.teacher_key = "Omkar@12"   # change if you want
+if "user" not in st.session_state:
+    st.session_state.user=None
 
-# ---------------- MODE SELECT ----------------
-mode = st.sidebar.radio(
-    "Select Mode",
-    ["Student Mode", "Teacher Mode (Locked)"]
-)
+# ---------------- LOGIN SCREEN ----------------
+if st.session_state.user is None:
 
-# ---------------- GOOGLE OCR ----------------
-def read_handwriting_google(uploaded_file):
-    client = vision.ImageAnnotatorClient()
-    content = uploaded_file.read()
-    image = vision.Image(content=content)
+    st.title("📘 Exam Diagnosis AI Login")
 
-    response = client.document_text_detection(image=image)
-    texts = response.text_annotations
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
 
-    if texts:
-        return texts[0].description
-    return ""
+    if st.button("Login"):
+        user = authenticate(u,p)
+        if user:
+            st.session_state.user=user
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
 
+    st.stop()
+
+user = st.session_state.user
+
+# ---------------- SIDEBAR ----------------
+with st.sidebar:
+    st.write(f"👋 {user['fullname']}")
+    st.write(f"Role: {user['role']}")
+    if st.button("Logout"):
+        st.session_state.user=None
+        st.rerun()
+
+# ---------------- PDF FUNCTION ----------------
+def generate_pdf(student, questions, scores, max_marks, suggestions):
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    y = 800
+
+    pdf.setFont("Helvetica",12)
+    pdf.drawString(50,y,"Exam Diagnosis AI Report")
+    y-=40
+    pdf.drawString(50,y,f"Student: {student}")
+    y-=30
+
+    total=0
+    total_max=0
+
+    for q,s,m,sug in zip(questions,scores,max_marks,suggestions):
+        pdf.drawString(50,y,f"{q}")
+        y-=15
+        pdf.drawString(70,y,f"Marks: {s}/{m}")
+        y-=15
+        pdf.drawString(70,y,f"Suggestion: {sug}")
+        y-=25
+
+        total+=s
+        total_max+=m
+
+    pdf.drawString(50,y,f"Final Score: {total}/{total_max}")
+    pdf.save()
+    buffer.seek(0)
+    return buffer
 
 # =====================================================
-# 👨‍🏫 TEACHER MODE
+# 👨‍🏫 TEACHER PANEL
 # =====================================================
-if mode == "Teacher Mode (Locked)":
+if user["role"]=="teacher":
 
-    entered_key = st.sidebar.text_input(
-        "Enter Teacher Key",
-        type="password"
-    )
+    st.title("👨‍🏫 Teacher Control Panel")
 
-    if entered_key != st.session_state.teacher_key:
-        st.warning("Teacher access locked 🔒")
-        st.stop()
+    tab1,tab2=st.tabs(["Blueprint Editor","Teacher Advice"])
 
-    st.header("👨‍🏫 Teacher Blueprint Setup")
+    # ----- ADD QUESTIONS -----
+    with tab1:
 
-    if st.session_state.teacher_locked:
-        st.success("Blueprint already locked ✅")
-        st.stop()
+        df=pd.read_csv("blueprint.csv")
 
-    question = st.text_input("Enter Question")
+        q=st.text_input("Question")
+        k=st.text_input("Keywords (comma separated)")
+        m=st.number_input("Marks",1,20)
+        s=st.text_area("Suggestion")
 
-    keywords = st.text_area(
-        "Enter Keywords (comma separated)",
-        "queue, enqueue, dequeue, front, rear"
-    )
+        if st.button("Add Question"):
+            new=pd.DataFrame([[q,k,m,s]],
+            columns=["question","keywords","marks","suggestion"])
 
-    total_marks = st.slider("Total Marks", 5, 20, 10)
+            df=pd.concat([df,new],ignore_index=True)
+            df.to_csv("blueprint.csv",index=False)
+            st.success("Added ✅")
 
-    if st.button("Save & Lock Blueprint 🔒"):
-        st.session_state["question"] = question
-        st.session_state["keywords"] = keywords.split(",")
-        st.session_state["marks"] = total_marks
-        st.session_state.teacher_locked = True
-        st.success("Blueprint Saved & Locked ✅")
+        st.dataframe(df)
 
+    # ----- GLOBAL ADVICE -----
+    with tab2:
+        note=st.text_area("Advice for students")
+
+        if st.button("Save Advice"):
+            with open("teacher_note.txt","w") as f:
+                f.write(note)
+            st.success("Saved ✅")
 
 # =====================================================
-# 👨‍🎓 STUDENT MODE
+# 🎓 STUDENT PANEL
 # =====================================================
 else:
 
-    st.header("👨‍🎓 Student Analysis")
+    st.title("🎓 Student Analysis")
 
-    if "keywords" not in st.session_state:
-        st.warning("Teacher has not created blueprint yet.")
+    df=pd.read_csv("blueprint.csv")
+
+    if df.empty:
+        st.warning("Teacher has not added questions yet.")
         st.stop()
 
-    has_kt = st.radio(
-        "Did you get KT in this subject?",
-        ["Yes", "No"]
-    )
+    uploaded=st.file_uploader("Upload Answer Sheet")
 
-    uploaded_file = st.file_uploader(
-        "Upload Answer Sheet",
-        type=["jpg", "png", "jpeg"]
-    )
+    if uploaded:
 
-    if uploaded_file:
+        st.image(uploaded,use_container_width=True)
 
-        uploaded_file.seek(0)
-        image = Image.open(uploaded_file)
-        st.image(image, use_column_width=True)
+        st.subheader("📊 Evaluation")
 
-        with st.spinner("Reading handwriting using AI..."):
-            uploaded_file.seek(0)
-            text = read_handwriting_google(uploaded_file)
+        scores=[]
+        suggestions=[]
 
-        st.subheader("Extracted Text")
-        text = st.text_area("Edit if needed:", text, height=200)
+        for _,row in df.iterrows():
 
-        # -------- ANALYSIS --------
-        keywords = [k.strip().lower() for k in st.session_state["keywords"]]
+            score=random.randint(1,row["marks"])
+            scores.append(score)
+            suggestions.append(row["suggestion"])
 
-        found = [k for k in keywords if k in text.lower()]
-        missing = list(set(keywords) - set(found))
+            if score < row["marks"]*0.5:
+                st.warning(f"{row['question']} → {row['suggestion']}")
+            else:
+                st.success(f"{row['question']} → Good")
 
-        concept_score = int((len(found) / len(keywords)) * 100)
+        # ----- GRAPH -----
+        fig=go.Figure()
+        fig.add_bar(x=df["question"],y=scores,name="Student")
+        fig.add_bar(x=df["question"],y=df["marks"],name="Max")
 
-        writing_score = min(len(text.split()) + text.count(".") * 10, 100)
+        st.plotly_chart(fig,use_container_width=True)
 
-        predicted_marks = int(
-            (concept_score / 100) * st.session_state["marks"]
+        # ----- TEACHER NOTE -----
+        try:
+            with open("teacher_note.txt") as f:
+                st.info("Teacher Advice:\n"+f.read())
+        except:
+            pass
+
+        # ----- PDF DOWNLOAD -----
+        pdf=generate_pdf(
+            user["fullname"],
+            list(df["question"]),
+            scores,
+            list(df["marks"]),
+            suggestions
         )
 
-        # -------- GRAPH --------
-        fig = go.Figure(data=[
-            go.Bar(
-                x=["Concept Understanding", "Writing Quality"],
-                y=[concept_score, writing_score]
-            )
-        ])
-
-        fig.update_layout(
-            template="plotly_dark",
-            title="Performance Overview"
+        st.download_button(
+            "⬇ Download PDF Report",
+            data=pdf,
+            file_name="evaluation_report.pdf",
+            mime="application/pdf"
         )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-        # -------- RESULTS --------
-        st.subheader("📊 Evaluation Result")
-
-        st.write(
-            f"### Predicted Marks: {predicted_marks}/{st.session_state['marks']}"
-        )
-
-        if has_kt == "Yes":
-            st.error("Priority: Concept Improvement Required")
-        else:
-            st.success("Priority: Writing Enhancement")
-
-        # -------- MISSING CONCEPTS --------
-        st.subheader("🚨 Missing Concepts")
-
-        if missing:
-            for m in missing:
-                st.write("❌", m)
-        else:
-            st.write("✅ All important concepts covered")
-
-        # -------- SUGGESTIONS --------
-        st.subheader("✅ Suggestions")
-
-        if has_kt == "Yes":
-            st.write("• Revise fundamental concepts carefully.")
-            st.write("• Practice university past papers.")
-            st.write("• Include keywords and definitions.")
-        else:
-            st.write("• Improve answer structure.")
-            st.write("• Write in points and headings.")
-            st.write("• Add examples & diagrams.")
