@@ -3,3 +3,4 @@ google-cloud-vision
 pillow
 plotly
 pandas
+reportlab
