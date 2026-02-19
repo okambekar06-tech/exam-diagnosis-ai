@@ -1,23 +1,28 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import json
+import io
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-import io
-import random
+from google.cloud import vision
+from google.oauth2 import service_account
 
-# ---------------- PAGE ----------------
 st.set_page_config(page_title="Exam Diagnosis AI", layout="wide")
 
-# ---------------- LOAD USERS ----------------
+# ---------------- GOOGLE VISION ----------------
+cred_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+credentials = service_account.Credentials.from_service_account_info(cred_dict)
+vision_client = vision.ImageAnnotatorClient(credentials=credentials)
+
+# ---------------- USERS ----------------
 @st.cache_data
 def load_users():
     return pd.read_csv("users.csv")
 
-# ---------------- LOGIN ----------------
-def authenticate(username, password):
-    users = load_users()
-    user = users[(users.username==username) & (users.password==password)]
+def authenticate(u,p):
+    users=load_users()
+    user=users[(users.username==u)&(users.password==p)]
     if not user.empty:
         return user.iloc[0].to_dict()
     return None
@@ -25,27 +30,26 @@ def authenticate(username, password):
 if "user" not in st.session_state:
     st.session_state.user=None
 
-# ---------------- LOGIN SCREEN ----------------
+# ---------------- LOGIN ----------------
 if st.session_state.user is None:
 
     st.title("📘 Exam Diagnosis AI Login")
 
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
+    u=st.text_input("Username")
+    p=st.text_input("Password",type="password")
 
     if st.button("Login"):
-        user = authenticate(u,p)
+        user=authenticate(u,p)
         if user:
             st.session_state.user=user
             st.rerun()
         else:
-            st.error("Invalid credentials")
+            st.error("Invalid login")
 
     st.stop()
 
-user = st.session_state.user
+user=st.session_state.user
 
-# ---------------- SIDEBAR ----------------
 with st.sidebar:
     st.write(f"👋 {user['fullname']}")
     st.write(f"Role: {user['role']}")
@@ -53,32 +57,65 @@ with st.sidebar:
         st.session_state.user=None
         st.rerun()
 
-# ---------------- PDF FUNCTION ----------------
-def generate_pdf(student, questions, scores, max_marks, suggestions):
+# ---------------- OCR ----------------
+def read_handwriting(file):
+    content=file.read()
+    image=vision.Image(content=content)
+    response=vision_client.document_text_detection(image=image)
+    return response.full_text_annotation.text
 
-    buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    y = 800
+# ---------------- ANALYSIS ----------------
+def analyze_answer(text, keywords, marks, kt_mode):
 
-    pdf.setFont("Helvetica",12)
+    kw=[k.strip().lower() for k in keywords.split(",")]
+    matched=[k for k in kw if k in text.lower()]
+    gaps=list(set(kw)-set(matched))
+
+    concept_score=(len(matched)/len(kw))*100 if kw else 0
+    writing_score=min(len(text.split())/80*10,10)
+    obtained=round((concept_score/100)*marks,2)
+
+    # PRIORITY ORDER
+    priority=[]
+
+    if kt_mode:
+        priority.append("Revise entire syllabus starting from core definitions")
+        priority.append("Practice previous university papers daily")
+
+    if concept_score < 60:
+        priority.append("Strengthen conceptual understanding")
+
+    if gaps:
+        priority.append("Focus on missing keywords and diagrams")
+
+    if writing_score < 5:
+        priority.append("Improve answer structure and explanation")
+
+    if not priority:
+        priority.append("Maintain consistency and revise weekly")
+
+    return obtained, concept_score, writing_score, gaps, priority
+
+# ---------------- PDF ----------------
+def generate_pdf(student, questions, scores, max_marks):
+
+    buffer=io.BytesIO()
+    pdf=canvas.Canvas(buffer,pagesize=A4)
+
+    y=800
     pdf.drawString(50,y,"Exam Diagnosis AI Report")
     y-=40
     pdf.drawString(50,y,f"Student: {student}")
     y-=30
 
-    total=0
-    total_max=0
+    total=sum(scores)
+    total_max=sum(max_marks)
 
-    for q,s,m,sug in zip(questions,scores,max_marks,suggestions):
-        pdf.drawString(50,y,f"{q}")
+    for q,s,m in zip(questions,scores,max_marks):
+        pdf.drawString(50,y,q)
         y-=15
         pdf.drawString(70,y,f"Marks: {s}/{m}")
-        y-=15
-        pdf.drawString(70,y,f"Suggestion: {sug}")
         y-=25
-
-        total+=s
-        total_max+=m
 
     pdf.drawString(50,y,f"Final Score: {total}/{total_max}")
     pdf.save()
@@ -86,55 +123,44 @@ def generate_pdf(student, questions, scores, max_marks, suggestions):
     return buffer
 
 # =====================================================
-# 👨‍🏫 TEACHER PANEL
+# TEACHER PANEL
 # =====================================================
 if user["role"]=="teacher":
 
     st.title("👨‍🏫 Teacher Control Panel")
 
-    tab1,tab2=st.tabs(["Blueprint Editor","Teacher Advice"])
+    df=pd.read_csv("blueprint.csv")
 
-    # ----- ADD QUESTIONS -----
-    with tab1:
+    q=st.text_input("Question")
+    k=st.text_input("Keywords")
+    m=st.number_input("Marks",1,20)
+    s=st.text_area("Suggestion")
 
-        df=pd.read_csv("blueprint.csv")
+    if st.button("Add Question"):
+        new=pd.DataFrame([[q,k,m,s]],
+        columns=["question","keywords","marks","suggestion"])
+        df=pd.concat([df,new],ignore_index=True)
+        df.to_csv("blueprint.csv",index=False)
+        st.success("Added")
 
-        q=st.text_input("Question")
-        k=st.text_input("Keywords (comma separated)")
-        m=st.number_input("Marks",1,20)
-        s=st.text_area("Suggestion")
-
-        if st.button("Add Question"):
-            new=pd.DataFrame([[q,k,m,s]],
-            columns=["question","keywords","marks","suggestion"])
-
-            df=pd.concat([df,new],ignore_index=True)
-            df.to_csv("blueprint.csv",index=False)
-            st.success("Added ✅")
-
-        st.dataframe(df)
-
-    # ----- GLOBAL ADVICE -----
-    with tab2:
-        note=st.text_area("Advice for students")
-
-        if st.button("Save Advice"):
-            with open("teacher_note.txt","w") as f:
-                f.write(note)
-            st.success("Saved ✅")
+    st.dataframe(df)
 
 # =====================================================
-# 🎓 STUDENT PANEL
+# STUDENT PANEL
 # =====================================================
 else:
 
     st.title("🎓 Student Analysis")
 
-    df=pd.read_csv("blueprint.csv")
+    # ⭐ KT QUESTION AFTER LOGIN
+    kt_choice = st.radio(
+        "Did you get KT / Fail in this subject?",
+        ["No, I want improvement", "Yes, I have KT / Failed"]
+    )
 
-    if df.empty:
-        st.warning("Teacher has not added questions yet.")
-        st.stop()
+    kt_mode = True if kt_choice.startswith("Yes") else False
+
+    df=pd.read_csv("blueprint.csv")
 
     uploaded=st.file_uploader("Upload Answer Sheet")
 
@@ -142,48 +168,50 @@ else:
 
         st.image(uploaded,use_container_width=True)
 
-        st.subheader("📊 Evaluation")
+        with st.spinner("Reading handwriting..."):
+            text=read_handwriting(uploaded)
+
+        st.subheader("Extracted Text")
+        st.write(text)
 
         scores=[]
-        suggestions=[]
+        questions=list(df["question"])
 
         for _,row in df.iterrows():
 
-            score=random.randint(1,row["marks"])
-            scores.append(score)
-            suggestions.append(row["suggestion"])
+            marks,concept,writing,gaps,priority=analyze_answer(
+                text,row["keywords"],row["marks"],kt_mode
+            )
 
-            if score < row["marks"]*0.5:
-                st.warning(f"{row['question']} → {row['suggestion']}")
-            else:
-                st.success(f"{row['question']} → Good")
+            scores.append(marks)
 
-        # ----- GRAPH -----
+            st.markdown(f"### {row['question']}")
+            st.metric("Concept Score",f"{concept:.1f}%")
+            st.metric("Writing Score",f"{writing:.1f}/10")
+
+            if gaps:
+                for g in gaps:
+                    st.warning(f"Missing Concept: {g}")
+
+            st.subheader("📌 Priority Improvement Order")
+            for i,p in enumerate(priority,1):
+                st.write(f"{i}. {p}")
+
         fig=go.Figure()
-        fig.add_bar(x=df["question"],y=scores,name="Student")
-        fig.add_bar(x=df["question"],y=df["marks"],name="Max")
-
+        fig.add_bar(x=questions,y=scores,name="Student")
+        fig.add_bar(x=questions,y=df["marks"],name="Max")
         st.plotly_chart(fig,use_container_width=True)
 
-        # ----- TEACHER NOTE -----
-        try:
-            with open("teacher_note.txt") as f:
-                st.info("Teacher Advice:\n"+f.read())
-        except:
-            pass
-
-        # ----- PDF DOWNLOAD -----
         pdf=generate_pdf(
             user["fullname"],
-            list(df["question"]),
+            questions,
             scores,
-            list(df["marks"]),
-            suggestions
+            list(df["marks"])
         )
 
         st.download_button(
             "⬇ Download PDF Report",
-            data=pdf,
-            file_name="evaluation_report.pdf",
-            mime="application/pdf"
+            pdf,
+            "evaluation_report.pdf",
+            "application/pdf"
         )
